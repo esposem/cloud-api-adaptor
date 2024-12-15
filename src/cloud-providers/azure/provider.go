@@ -241,7 +241,7 @@ func (p *azureProvider) CreateInstance(ctx context.Context, podName, sandboxID s
 		imageId = spec.Image
 	}
 
-	vmParameters, err := p.getVMParameters(instanceSize, diskName, cloudConfigData, sshBytes, instanceName, nicName, imageId)
+	vmParameters, err := p.getVMParameters(instanceSize, diskName, spec.Resources.Storage, cloudConfigData, sshBytes, instanceName, nicName, imageId)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +352,10 @@ func (p *azureProvider) updateInstanceSizeSpecList() error {
 		}
 		for _, vmSize := range nextResult.VirtualMachineSizeListResult.Value {
 			if util.Contains(instanceSizes, *vmSize.Name) {
-				instanceSizeSpecList = append(instanceSizeSpecList, provider.InstanceTypeSpec{InstanceType: *vmSize.Name, VCPUs: int64(*vmSize.NumberOfCores), Memory: int64(*vmSize.MemoryInMB)})
+				vcpus, memory := int64(*vmSize.NumberOfCores), int64(*vmSize.MemoryInMB)
+				resources := provider.NewPodVMResources(vcpus, memory)
+				instanceSizeSpec := provider.InstanceTypeSpec{InstanceType: *vmSize.Name, Resources: resources}
+				instanceSizeSpecList = append(instanceSizeSpecList, instanceSizeSpec)
 			}
 		}
 	}
@@ -373,7 +376,7 @@ func (p *azureProvider) getResourceTags() map[string]*string {
 	return tags
 }
 
-func (p *azureProvider) getVMParameters(instanceSize, diskName, cloudConfig string, sshBytes []byte, instanceName, nicName string, imageId string) (*armcompute.VirtualMachine, error) {
+func (p *azureProvider) getVMParameters(instanceSize, diskName, diskSize int64, cloudConfig string, sshBytes []byte, instanceName, nicName string, imageId string) (*armcompute.VirtualMachine, error) {
 	userDataB64 := base64.StdEncoding.EncodeToString([]byte(cloudConfig))
 
 	// Azure limits the base64 encrypted userData to 64KB.
@@ -418,6 +421,18 @@ func (p *azureProvider) getVMParameters(instanceSize, diskName, cloudConfig stri
 
 	networkConfig := p.buildNetworkConfig(nicName)
 
+	osDisk := armcompute.OSDisk{
+		Name:         to.Ptr(diskName),
+		CreateOption: to.Ptr(armcompute.DiskCreateOptionTypesFromImage),
+		Caching:      to.Ptr(armcompute.CachingTypesReadWrite),
+		DeleteOption: to.Ptr(armcompute.DiskDeleteOptionTypesDelete),
+		ManagedDisk:  managedDiskParams,
+	}
+
+	if diskSize > 0 {
+		osDisk.DiskSizeGB = to.Ptr(int32(diskSize))
+	}
+
 	vmParameters := armcompute.VirtualMachine{
 		Location: to.Ptr(p.serviceConfig.Region),
 		Properties: &armcompute.VirtualMachineProperties{
@@ -426,13 +441,7 @@ func (p *azureProvider) getVMParameters(instanceSize, diskName, cloudConfig stri
 			},
 			StorageProfile: &armcompute.StorageProfile{
 				ImageReference: imgRef,
-				OSDisk: &armcompute.OSDisk{
-					Name:         to.Ptr(diskName),
-					CreateOption: to.Ptr(armcompute.DiskCreateOptionTypesFromImage),
-					Caching:      to.Ptr(armcompute.CachingTypesReadWrite),
-					DeleteOption: to.Ptr(armcompute.DiskDeleteOptionTypesDelete),
-					ManagedDisk:  managedDiskParams,
-				},
+				OSDisk:         &osDisk,
 			},
 			OSProfile: &armcompute.OSProfile{
 				AdminUsername: to.Ptr(p.serviceConfig.SSHUserName),
